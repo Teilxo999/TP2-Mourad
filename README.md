@@ -1,4 +1,4 @@
-# TP2 : Gestion des branches
+# TP2 - BelabedMourad - Gestion des branches
 <<<<<<< HEAD
 Modification sur develop avant merge de f1.
 =======
