@@ -1,0 +1,915 @@
+local OrionLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/jensonhirst/Orion/main/source"))()
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+local directPaths = {
+    roll = {"Assets", "Reroll", "UniversalCrate", "Remotes", "RollRequest"},
+    sell = {"Assets", "Reroll", "Remotes", "SellRemote"},
+    pickup = {"Assets", "Drops", "Remotes", "Pickup"},
+    attack = {"Assets", "Combat", "Remotes", "Attack"},
+    isRolling = {"Assets", "Reroll", "Remotes", "IsRollingRemote"},
+    rollButton = {"Assets", "Reroll", "Remotes", "RollButtonRemote"},
+    convert = {"Assets", "Remotes", "GemsConversion", "GemsConversion"},
+    rarityModule = {"Crates", "UniversalCrate", "Modules", "RarityModule"},
+    rollModule = {"Assets", "Reroll", "UniversalCrate", "Modules", "RollModule"},
+    cutsceneModule = {"Assets", "Remotes", "Cutscene", "CutsceneModule"},
+    cinematicModule = {"Assets", "Remotes", "Cutscene", "CinematicModule"},
+}
+
+local function safeRequire(target)
+    local ok, result = pcall(function()
+        return require(target)
+    end)
+    if ok then
+        return result
+    end
+end
+
+local function findFirst(root, predicate)
+    for _, inst in ipairs(root:GetDescendants()) do
+        local found = predicate(inst)
+        if found then
+            return inst, found
+        end
+    end
+end
+
+local function findByPath(root, segments)
+    local current = root
+    for _, segment in ipairs(segments) do
+        if not current then
+            return
+        end
+        current = current:FindFirstChild(segment)
+    end
+    return current
+end
+
+local function findRemote(keywordList)
+    local keywords = {}
+    for _, kw in ipairs(keywordList) do
+        keywords[#keywords + 1] = string.lower(kw)
+    end
+    return select(1, findFirst(ReplicatedStorage, function(inst)
+        if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
+            local name = string.lower(inst.Name)
+            for _, kw in ipairs(keywords) do
+                if string.find(name, kw, 1, true) then
+                    return true
+                end
+            end
+        end
+    end))
+end
+
+local function findModule(keywordList)
+    local keywords = {}
+    for _, kw in ipairs(keywordList) do
+        keywords[#keywords + 1] = string.lower(kw)
+    end
+    return select(1, findFirst(ReplicatedStorage, function(inst)
+        if inst:IsA("ModuleScript") then
+            local name = string.lower(inst.Name)
+            for _, kw in ipairs(keywords) do
+                if string.find(name, kw, 1, true) then
+                    return true
+                end
+            end
+        end
+    end))
+end
+
+local references = {
+    roll = nil,
+    sell = nil,
+    pickup = nil,
+    attack = nil,
+    isRolling = nil,
+    rollButton = nil,
+    convert = nil,
+    rarityModule = nil,
+    rollModule = nil,
+    cutsceneModule = nil,
+    cinematicModule = nil,
+}
+
+local crateConfigs = {}
+local crateRemotes = {}
+
+local function refreshReferences()
+    for key, path in pairs(directPaths) do
+        references[key] = findByPath(ReplicatedStorage, path) or references[key]
+    end
+    references.roll = references.roll or findRemote({"roll", "crate"})
+    references.sell = references.sell or findRemote({"sell"})
+    references.pickup = references.pickup or findRemote({"pickup", "collect"})
+    references.attack = references.attack or findRemote({"attack", "damage", "swing"})
+    references.isRolling = references.isRolling or findRemote({"isrolling"})
+    references.rarityModule = references.rarityModule or findModule({"rarity"})
+    references.rollModule = references.rollModule or findModule({"rollmodule", "roll"})
+    references.cutsceneModule = references.cutsceneModule or findModule({"cutscene"})
+    references.cinematicModule = references.cinematicModule or findModule({"cinematic"})
+end
+
+refreshReferences()
+
+local function ensureReference(key)
+    if not references[key] then
+        refreshReferences()
+    end
+    return references[key]
+end
+
+local function ingestCrateConfig(name, data)
+    if not name or type(data) ~= "table" then
+        return
+    end
+    if not crateConfigs[name] then
+        crateConfigs[name] = data
+    end
+    local compact = string.gsub(name, "%s+", "")
+    if compact ~= name then
+        crateConfigs[compact] = data
+    end
+end
+
+local function scanCrateConfigs()
+    local crates = {"FreeCrate", "FreeCrateRobux"}
+    local function addCrate(name, data)
+        if not name or type(name) ~= "string" then
+            return
+        end
+        if not table.find(crates, name) then
+            crates[#crates + 1] = name
+        end
+        ingestCrateConfig(name, data)
+    end
+
+    local configModule = findByPath(ReplicatedStorage, {"Crates", "UniversalCrate", "ConfigModule"})
+    configModule = configModule or ensureReference("rarityModule")
+    configModule = configModule or findModule({"config", "crate"})
+    local function digestConfigModule(module)
+        local config = module and safeRequire(module)
+        if typeof(config) == "table" then
+            if config.crateName and config.rarities then
+                addCrate(config.crateName, config)
+            end
+            for key, value in pairs(config) do
+                if type(key) == "string" and type(value) == "table" then
+                    if value.crateName and value.rarities then
+                        addCrate(value.crateName, value)
+                    elseif value.rarities then
+                        addCrate(key, value)
+                    end
+                end
+            end
+        end
+    end
+
+    local rerollRoot = findByPath(ReplicatedStorage, {"Assets", "Reroll"})
+    if rerollRoot then
+        for _, inst in ipairs(rerollRoot:GetDescendants()) do
+            if inst.Name == "RollRequest" and (inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction")) then
+                local ancestor = inst.Parent
+                while ancestor and ancestor ~= rerollRoot do
+                    if ancestor:IsA("Folder") then
+                        addCrate(ancestor.Name)
+                    end
+                    ancestor = ancestor.Parent
+                end
+            end
+        end
+    end
+
+    if configModule then
+        digestConfigModule(configModule)
+    end
+
+    for _, module in ipairs(ReplicatedStorage:GetDescendants()) do
+        if module:IsA("ModuleScript") then
+            local lower = string.lower(module.Name)
+            if string.find(lower, "crate") or string.find(lower, "config") or string.find(lower, "cid") or string.find(lower, "event") then
+                digestConfigModule(module)
+            end
+        end
+    end
+
+    return crates
+end
+
+local availableCrates = scanCrateConfigs()
+
+local autoOpenFreeCrate = false
+local autoSellPets = false
+local autoOpenAllCrates = false
+local autoPickup = false
+local autoFarm = false
+local luckyMode = false
+local disableAnimations = true
+local autoConvert = true
+local selectedCrate = availableCrates[1]
+local autoOpenSpeed = 0.1
+local convertAmount = 20000
+local farmRange = 250
+
+local function getCrateConfig(crateName)
+    if not crateName then
+        return
+    end
+    return crateConfigs[crateName] or crateConfigs[string.gsub(crateName, "%s+", "")]
+end
+
+local function notify(title, text, time)
+    OrionLib:MakeNotification({
+        Name = title,
+        Content = text,
+        Image = "rbxassetid://4483345998",
+        Time = time or 2,
+    })
+end
+
+local function resolveCrateRemote(crateName)
+    local cached = crateRemotes[crateName]
+    if cached and cached.remote and cached.remote.Parent then
+        return cached
+    end
+    local crateData = getCrateConfig(crateName)
+    local loweredName = string.lower(crateName or "")
+    local requiresUniverse = crateData and (crateData.universe or crateData.universeName or crateData.universeId or crateData.universeID)
+    if not requiresUniverse and (string.find(loweredName, "limited", 1, true) or string.find(loweredName, "event", 1, true)) then
+        requiresUniverse = true
+    end
+    local lowered = loweredName
+    local compact = string.gsub(loweredName, "%s+", "")
+    local rerollRoot = findByPath(ReplicatedStorage, {"Assets", "Reroll"})
+    if rerollRoot then
+        for _, inst in ipairs(rerollRoot:GetDescendants()) do
+            if inst.Name == "RollRequest" and (inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction")) then
+                local ancestor = inst.Parent
+                while ancestor and ancestor ~= rerollRoot do
+                    local name = string.lower(string.gsub(ancestor.Name, "%s+", ""))
+                    if name == compact or string.find(name, compact, 1, true) or string.find(compact, name, 1, true) then
+                        local mode = inst:IsA("RemoteEvent") and "roll" or "function"
+                        if string.find(name, "limited", 1, true) then
+                            mode = "limited"
+                        end
+                        crateRemotes[crateName] = {remote = inst, mode = mode}
+                        return crateRemotes[crateName]
+                    end
+                    ancestor = ancestor.Parent
+                end
+            end
+        end
+    end
+    local rollButton = requiresUniverse and ensureReference("rollButton") or nil
+    if rollButton then
+        crateRemotes[crateName] = {remote = rollButton, mode = "button"}
+        return crateRemotes[crateName]
+    end
+    local roll = ensureReference("roll")
+    if roll then
+        crateRemotes[crateName] = {remote = roll, mode = "roll"}
+        return crateRemotes[crateName]
+    end
+    local found = select(1, findFirst(ReplicatedStorage, function(inst)
+        if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
+            local name = string.lower(inst.Name)
+            if (string.find(name, "roll") or string.find(name, "crate") or string.find(name, lowered)) and string.find(name, lowered) then
+                return true
+            end
+        end
+    end))
+    if found then
+        crateRemotes[crateName] = {remote = found, mode = found:IsA("RemoteEvent") and "roll" or "function"}
+        return crateRemotes[crateName]
+    end
+end
+
+local function convertCurrency(amount)
+    local convert = ensureReference("convert")
+    if convert then
+        pcall(function()
+            convert:FireServer("Convert", amount or convertAmount)
+        end)
+    end
+end
+
+local function fireCrateRemote(crateName)
+    local record = resolveCrateRemote(crateName)
+    if not record or not record.remote then
+        notify("Missing Remote", "RollRequest not found", 2)
+        return
+    end
+    local crateData = getCrateConfig(crateName)
+    local universe = crateData and (crateData.universe or crateData.universeName or crateData.universeId or crateData.universeID)
+    local rawName = (crateData and crateData.crateName) or crateName
+    local normalized = crateName and crateName:gsub("%s+", "") or crateName
+    local universeName = universe or rawName
+    local price = crateData and (crateData.price or crateData.cost or crateData.costGem or crateData.gemCost)
+    local currency = crateData and (crateData.currency or crateData.currencyType or crateData.currencyName)
+    pcall(function()
+        if record.mode == "limited" then
+            local payload = {
+                crateName = rawName or normalized,
+                crate = rawName or normalized,
+                crateId = rawName or normalized,
+                universeName = universeName,
+                universe = universeName,
+                rollCount = 1,
+                amount = price or 1,
+                cost = price,
+                price = price,
+                auto = false,
+                currency = currency or "Gems",
+                currencyType = currency or "Gems",
+                useGems = true,
+            }
+            record.remote:FireServer("startReroll", payload)
+        elseif record.mode == "button" then
+            record.remote:Fire(rawName or normalized or crateName, universeName)
+        elseif record.remote:IsA("RemoteFunction") then
+            record.remote:InvokeServer(rawName or normalized or crateName, universeName)
+        else
+            if universeName then
+                record.remote:FireServer(rawName or normalized or crateName, universeName)
+            else
+                record.remote:FireServer(rawName or normalized or crateName)
+            end
+        end
+    end)
+end
+
+local function openFreeCrate()
+    if autoConvert then
+        convertCurrency(convertAmount)
+    end
+    fireCrateRemote("FreeCrate")
+end
+
+local function openCrate(crateName)
+    if autoConvert then
+        local crateData = getCrateConfig(crateName)
+        convertCurrency((crateData and (crateData.price or crateData.cost or crateData.costGem or crateData.gemCost)) or convertAmount)
+    end
+    fireCrateRemote(crateName)
+end
+
+local function sellPet(uniqueId)
+    local sell = ensureReference("sell")
+    if sell then
+        pcall(function()
+            sell:FireServer({
+                uniqueId = uniqueId or 1,
+                mode = "single",
+                correlationId = uniqueId or 1,
+                action = "sellRequest",
+            })
+        end)
+    else
+        notify("Missing Remote", "SellRemote not found", 2)
+    end
+end
+
+local function quickSellRarity(rarity)
+    local sell = ensureReference("sell")
+    if sell then
+        pcall(function()
+            sell:FireServer({
+                rarity = rarity,
+                mode = "bulkRarity",
+                correlationId = math.random(1, 1000),
+                action = "sellRequest",
+            })
+        end)
+    else
+        notify("Missing Remote", "SellRemote not found", 2)
+    end
+end
+
+local function getCharacterRoot()
+    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function findNearestEnemy()
+    local root = getCharacterRoot()
+    if not root then
+        return
+    end
+    local closest
+    local closestDist = farmRange
+    for _, model in ipairs(Workspace:GetDescendants()) do
+        local humanoid = model:IsA("Model") and model:FindFirstChildOfClass("Humanoid")
+        local hrp = humanoid and model:FindFirstChild("HumanoidRootPart")
+        if humanoid and humanoid.Health > 0 and hrp and model ~= LocalPlayer.Character then
+            local dist = (hrp.Position - root.Position).Magnitude
+            if dist < closestDist then
+                closestDist = dist
+                closest = hrp
+            end
+        end
+    end
+    return closest
+end
+
+local function attackTarget(target)
+    if not target then
+        return
+    end
+    local attack = ensureReference("attack")
+    if attack then
+        pcall(function()
+            attack:FireServer(target)
+        end)
+    else
+        pcall(function()
+            LocalPlayer.Character:PivotTo(CFrame.new(target.Position))
+        end)
+        pcall(function()
+            mouse1click()
+        end)
+    end
+end
+
+local function collectDrops()
+    if not autoPickup then
+        return
+    end
+    local root = getCharacterRoot()
+    if not root then
+        return
+    end
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        if inst:IsA("BasePart") and (string.find(string.lower(inst.Name), "drop") or string.find(string.lower(inst.Name), "loot")) then
+            if (inst.Position - root.Position).Magnitude < 300 then
+                pcall(function()
+                    LocalPlayer.Character:PivotTo(CFrame.new(inst.Position + Vector3.new(0, 2, 0)))
+                end)
+                local pickup = ensureReference("pickup")
+                if pickup then
+                    pcall(function()
+                        pickup:FireServer(inst)
+                    end)
+                else
+                    pcall(function()
+                        firetouchinterest(LocalPlayer.Character.HumanoidRootPart, inst, 0)
+                        firetouchinterest(LocalPlayer.Character.HumanoidRootPart, inst, 1)
+                    end)
+                end
+                task.wait(0.05)
+            end
+        end
+    end
+end
+
+local patchedRolls = {}
+
+local function pickBestRarity(crateName)
+    local crateData = getCrateConfig(crateName)
+    local priorities = {"Ultimate", "Secret", "Divine", "Mythic", "Elemental", "Exotic", "Legendary"}
+    local targetRarities = {}
+    if crateData and crateData.rarities then
+        for _, key in ipairs(priorities) do
+            if crateData.rarities[key] then
+                targetRarities[#targetRarities + 1] = {name = key, data = crateData.rarities[key]}
+            end
+        end
+    end
+    if #targetRarities == 0 then
+        for _, key in ipairs(priorities) do
+            targetRarities[#targetRarities + 1] = {
+                name = key,
+                data = {
+                    characters = {{id = key .. "Char", displayName = key .. " Hero", baseValue = 1}},
+                    color = Color3.fromRGB(255, 215, 0),
+                },
+            }
+        end
+    end
+    if #targetRarities > 0 then
+        local chosen = targetRarities[math.random(1, #targetRarities)]
+        local pick = chosen.data.characters and chosen.data.characters[math.random(1, #chosen.data.characters)]
+        if pick then
+            return {
+                rarity = chosen.name,
+                character = pick,
+                shiny = true,
+                shinyMultiplierUsed = 2,
+                valueAfterShiny = pick.baseValue and pick.baseValue * 2 or 0,
+                potentialRank = "X",
+                potentialMultiplier = 2.5,
+                finalValue = pick.baseValue and pick.baseValue * 5 or 0,
+                color = chosen.data.color,
+                fromPity = false,
+                cratePrice = crateData and crateData.price or 0,
+                universe = crateName,
+                crateName = crateData and crateData.crateName or crateName,
+            }
+        end
+    end
+end
+
+local function patchRollModule(module)
+    if not module or patchedRolls[module] then
+        return
+    end
+    local original = module.Roll
+    if not original then
+        return
+    end
+    module.Roll = function(crateName, rollCount, boostShiny)
+        if luckyMode then
+            local forced = pickBestRarity(crateName)
+            if forced then
+                return forced
+            end
+        end
+        return original(crateName, rollCount, boostShiny)
+    end
+    patchedRolls[module] = true
+end
+
+local function enableLuckyMode()
+    for _, module in ipairs(ReplicatedStorage:GetDescendants()) do
+        if module:IsA("ModuleScript") then
+            local lower = string.lower(module.Name)
+            if string.find(lower, "rarity") or string.find(lower, "roll") or string.find(lower, "crate") or string.find(lower, "cid") then
+                local loaded = safeRequire(module)
+                if type(loaded) == "table" and loaded.Roll then
+                    patchRollModule(loaded)
+                end
+            end
+        end
+    end
+end
+
+local function skipAnimations()
+    if not disableAnimations then
+        return
+    end
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if playerGui then
+        local cinematic = playerGui:FindFirstChild("Cinematic")
+        if cinematic and cinematic:IsA("ScreenGui") then
+            cinematic.Enabled = false
+        end
+    end
+    local cutsceneModule = ensureReference("cutsceneModule")
+    if cutsceneModule then
+        local module = safeRequire(cutsceneModule)
+        if module and module.StartCutscene then
+            module.StartCutscene = function()
+                return true
+            end
+        end
+    end
+    local cinematicModule = ensureReference("cinematicModule")
+    if cinematicModule then
+        local module = safeRequire(cinematicModule)
+        if module and module.makeCinematic then
+            module.makeCinematic = function() end
+        end
+    end
+    local isRolling = ensureReference("isRolling")
+    if isRolling and isRolling:IsA("RemoteEvent") then
+        pcall(function()
+            isRolling:FireServer(false)
+        end)
+    end
+    local rollModule = ensureReference("rollModule")
+    if rollModule then
+        local module = safeRequire(rollModule)
+        if module and module.StartRoll then
+            module.StartRoll = function()
+                return true
+            end
+        end
+    end
+end
+
+local function triggerCidEvent()
+    local eventRemote = select(1, findFirst(ReplicatedStorage, function(inst)
+        if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
+            local lower = string.lower(inst.Name)
+            if string.find(lower, "cid") or string.find(lower, "kageno") or string.find(lower, "event") then
+                return true
+            end
+        end
+    end))
+    if eventRemote then
+        pcall(function()
+            if eventRemote:IsA("RemoteEvent") then
+                eventRemote:FireServer()
+            else
+                eventRemote:InvokeServer()
+            end
+        end)
+        notify("CidKageno", "Event trigger sent", 3)
+    else
+        notify("CidKageno", "Event remote not found", 3)
+    end
+end
+
+local Window = OrionLib:MakeWindow({
+    Name = "Anime Champions RNG AutoFarm",
+    HidePremium = false,
+    SaveConfig = true,
+    ConfigFolder = "AnimeChampionsRNG",
+    IntroEnabled = true,
+    IntroText = "AutoFarm Script Loaded!",
+    IntroIcon = "rbxassetid://4483345998",
+    Icon = "rbxassetid://4483345998",
+})
+
+local MainTab = Window:MakeTab({Name = "Main", Icon = "rbxassetid://4483345998", PremiumOnly = false})
+local CrateTab = Window:MakeTab({Name = "Crates", Icon = "rbxassetid://4483345998", PremiumOnly = false})
+local LuckyTab = Window:MakeTab({Name = "Lucky", Icon = "rbxassetid://4483345998", PremiumOnly = false})
+local UtilityTab = Window:MakeTab({Name = "Utility", Icon = "rbxassetid://4483345998", PremiumOnly = false})
+
+local mainSection = MainTab:AddSection({Name = "Auto Farm"})
+local sellSection = MainTab:AddSection({Name = "Auto Sell"})
+local crateSection = CrateTab:AddSection({Name = "Crate Selection"})
+local openSection = CrateTab:AddSection({Name = "Auto Open"})
+local luckySection = LuckyTab:AddSection({Name = "Lucky Mode"})
+local utilitySection = UtilityTab:AddSection({Name = "Maintenance"})
+
+mainSection:AddToggle({
+    Name = "Auto Farm Nearest",
+    Default = false,
+    Callback = function(value)
+        autoFarm = value
+    end,
+})
+
+mainSection:AddToggle({
+    Name = "Auto Pickup Drops",
+    Default = false,
+    Callback = function(value)
+        autoPickup = value
+    end,
+})
+
+mainSection:AddSlider({
+    Name = "Farm Range",
+    Min = 50,
+    Max = 500,
+    Increment = 10,
+    Default = farmRange,
+    Color = Color3.fromRGB(255, 170, 0),
+    ValueName = "studs",
+    Callback = function(value)
+        farmRange = value
+    end,
+})
+
+mainSection:AddToggle({
+    Name = "Auto Open Free Crate",
+    Default = false,
+    Callback = function(value)
+        autoOpenFreeCrate = value
+    end,
+})
+
+sellSection:AddToggle({
+    Name = "Auto Sell Common/Rare/Epic",
+    Default = false,
+    Callback = function(value)
+        autoSellPets = value
+    end,
+})
+
+sellSection:AddButton({
+    Name = "Quick Sell Common",
+    Callback = function()
+        quickSellRarity("Common")
+    end,
+})
+
+sellSection:AddButton({
+    Name = "Quick Sell Rare",
+    Callback = function()
+        quickSellRarity("Rare")
+    end,
+})
+
+sellSection:AddButton({
+    Name = "Quick Sell Epic",
+    Callback = function()
+        quickSellRarity("Epic")
+    end,
+})
+
+crateSection:AddDropdown({
+    Name = "Select Crate",
+    Default = selectedCrate,
+    Options = availableCrates,
+    Callback = function(value)
+        selectedCrate = value
+        notify("Crate Selected", "Selected: " .. value, 2)
+    end,
+})
+
+openSection:AddToggle({
+    Name = "Auto Open Selected",
+    Default = false,
+    Callback = function(value)
+        autoOpenAllCrates = value
+    end,
+})
+
+openSection:AddToggle({
+    Name = "Auto Convert Currency",
+    Default = autoConvert,
+    Callback = function(value)
+        autoConvert = value
+    end,
+})
+
+openSection:AddSlider({
+    Name = "Conversion Amount",
+    Min = 1000,
+    Max = 100000,
+    Increment = 500,
+    Default = convertAmount,
+    Color = Color3.fromRGB(0, 200, 255),
+    ValueName = "coins",
+    Callback = function(value)
+        convertAmount = value
+    end,
+})
+
+openSection:AddSlider({
+    Name = "Open Speed (seconds)",
+    Min = 0.01,
+    Max = 2,
+    Default = autoOpenSpeed,
+    Increment = 0.01,
+    Color = Color3.fromRGB(255, 255, 0),
+    ValueName = "speed",
+    Callback = function(value)
+        autoOpenSpeed = value
+    end,
+})
+
+luckySection:AddToggle({
+    Name = "Enable Lucky Mode",
+    Default = false,
+    Callback = function(value)
+        luckyMode = value
+        if value then
+            enableLuckyMode()
+            notify("Lucky Mode", "Forced high rarity enabled", 3)
+            task.spawn(function()
+                task.wait(0.5)
+                openCrate(selectedCrate)
+            end)
+        end
+    end,
+})
+
+luckySection:AddButton({
+    Name = "Test Lucky Roll",
+    Callback = function()
+        openCrate(selectedCrate)
+    end,
+})
+
+utilitySection:AddButton({
+    Name = "Rescan Remotes",
+    Callback = function()
+        references.roll = findRemote({"roll", "crate"}) or references.roll
+        references.sell = findRemote({"sell"}) or references.sell
+        references.pickup = findRemote({"pickup", "collect"}) or references.pickup
+        references.attack = findRemote({"attack", "damage", "swing"}) or references.attack
+        references.isRolling = findRemote({"isrolling"}) or references.isRolling
+        references.rarityModule = findModule({"rarity"}) or references.rarityModule
+        references.rollModule = findModule({"rollmodule", "roll"}) or references.rollModule
+        references.cutsceneModule = findModule({"cutscene"}) or references.cutsceneModule
+        references.cinematicModule = findModule({"cinematic"}) or references.cinematicModule
+        notify("Remotes", "Scan complete", 2)
+    end,
+})
+
+utilitySection:AddButton({
+    Name = "Skip Animations Now",
+    Callback = function()
+        skipAnimations()
+        notify("Animations", "Disabled cutscenes", 2)
+    end,
+})
+
+utilitySection:AddToggle({
+    Name = "Keep Animations Disabled",
+    Default = disableAnimations,
+    Callback = function(value)
+        disableAnimations = value
+    end,
+})
+
+utilitySection:AddButton({
+    Name = "Trigger CidKageno Event",
+    Callback = function()
+        triggerCidEvent()
+    end,
+})
+
+utilitySection:AddButton({
+    Name = "Stop All", 
+    Callback = function()
+        autoOpenFreeCrate = false
+        autoSellPets = false
+        autoOpenAllCrates = false
+        autoPickup = false
+        autoFarm = false
+        luckyMode = false
+        notify("Stopped", "All loops halted", 3)
+    end,
+})
+
+utilitySection:AddButton({
+    Name = "Destroy GUI",
+    Callback = function()
+        OrionLib:Destroy()
+    end,
+})
+
+OrionLib:MakeNotification({
+    Name = "Anime Champion's RNG Script Loaded!",
+    Content = "OrionLib UI with auto farm + crates",
+    Image = "rbxassetid://4483345998",
+    Time = 5,
+})
+
+OrionLib:Init()
+
+task.spawn(function()
+    while true do
+        refreshReferences()
+        task.wait(2)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoOpenFreeCrate then
+            openFreeCrate()
+        end
+        task.wait(autoOpenSpeed)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoOpenAllCrates then
+            openCrate(selectedCrate)
+        end
+        task.wait(autoOpenSpeed)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoSellPets then
+            quickSellRarity("Common")
+            task.wait(0.15)
+            quickSellRarity("Rare")
+            task.wait(0.15)
+            quickSellRarity("Epic")
+        end
+        task.wait(1)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoFarm then
+            local target = findNearestEnemy()
+            if target then
+                pcall(function()
+                    LocalPlayer.Character:PivotTo(CFrame.new(target.Position + Vector3.new(0, 3, 0)))
+                end)
+                attackTarget(target)
+            end
+        end
+        task.wait(0.05)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoPickup then
+            collectDrops()
+        end
+        task.wait(0.25)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        skipAnimations()
+        task.wait(0.5)
+    end
+end)
