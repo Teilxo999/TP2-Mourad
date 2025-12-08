@@ -98,6 +98,7 @@ local references = {
 
 local crateConfigs = {}
 local crateRemotes = {}
+local crateSources = {}
 
 local function refreshReferences()
     for key, path in pairs(directPaths) do
@@ -123,29 +124,31 @@ local function ensureReference(key)
     return references[key]
 end
 
-local function ingestCrateConfig(name, data)
+local function ingestCrateConfig(name, data, sourceName)
     if not name or type(data) ~= "table" then
         return
     end
     if not crateConfigs[name] then
         crateConfigs[name] = data
     end
+    crateSources[name] = sourceName or name
     local compact = string.gsub(name, "%s+", "")
     if compact ~= name then
         crateConfigs[compact] = data
+        crateSources[compact] = sourceName or name
     end
 end
 
 local function scanCrateConfigs()
     local crates = {"FreeCrate", "FreeCrateRobux"}
-    local function addCrate(name, data)
+    local function addCrate(name, data, sourceName)
         if not name or type(name) ~= "string" then
             return
         end
         if not table.find(crates, name) then
             crates[#crates + 1] = name
         end
-        ingestCrateConfig(name, data)
+        ingestCrateConfig(name, data, sourceName)
     end
 
     local configModule = findByPath(ReplicatedStorage, {"Crates", "UniversalCrate", "ConfigModule"})
@@ -153,16 +156,17 @@ local function scanCrateConfigs()
     configModule = configModule or findModule({"config", "crate"})
     local function digestConfigModule(module)
         local config = module and safeRequire(module)
+        local sourceName = module and module.Name
         if typeof(config) == "table" then
             if config.crateName and config.rarities then
-                addCrate(config.crateName, config)
+                addCrate(config.crateName, config, sourceName)
             end
             for key, value in pairs(config) do
                 if type(key) == "string" and type(value) == "table" then
                     if value.crateName and value.rarities then
-                        addCrate(value.crateName, value)
+                        addCrate(value.crateName, value, key)
                     elseif value.rarities then
-                        addCrate(key, value)
+                        addCrate(key, value, key)
                     end
                 end
             end
@@ -204,6 +208,8 @@ local availableCrates = scanCrateConfigs()
 
 local autoOpenFreeCrate = false
 local autoSellPets = false
+local autoSellExotic = false
+local autoSellMythic = false
 local autoOpenAllCrates = false
 local autoPickup = false
 local autoFarm = false
@@ -238,7 +244,7 @@ local function resolveCrateRemote(crateName)
     end
     local crateData = getCrateConfig(crateName)
     local loweredName = string.lower(crateName or "")
-    local requiresUniverse = crateData and (crateData.universe or crateData.universeName or crateData.universeId or crateData.universeID)
+    local requiresUniverse = crateData and (crateData.universe or crateData.universeName or crateData.universeId or crateData.universeID or crateSources[crateName])
     if not requiresUniverse and (string.find(loweredName, "limited", 1, true) or string.find(loweredName, "event", 1, true)) then
         requiresUniverse = true
     end
@@ -305,29 +311,47 @@ local function fireCrateRemote(crateName)
     end
     local crateData = getCrateConfig(crateName)
     local universe = crateData and (crateData.universe or crateData.universeName or crateData.universeId or crateData.universeID)
+    local sourceUniverse = crateSources[crateName]
     local rawName = (crateData and crateData.crateName) or crateName
     local normalized = crateName and crateName:gsub("%s+", "") or crateName
-    local universeName = universe or rawName
+    local universeName = universe or sourceUniverse or rawName
     local price = crateData and (crateData.price or crateData.cost or crateData.costGem or crateData.gemCost)
     local currency = crateData and (crateData.currency or crateData.currencyType or crateData.currencyName)
+    local function moveToCid()
+        local npc = Workspace:FindFirstChild("Map")
+        npc = npc and npc:FindFirstChild("NPC")
+        npc = npc and npc:FindFirstChild("CidKageno")
+        local hrp = npc and npc:FindFirstChild("HumanoidRootPart")
+        if hrp and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            pcall(function()
+                LocalPlayer.Character:PivotTo(CFrame.new(hrp.Position + Vector3.new(0, 3, 0)))
+            end)
+        end
+    end
     pcall(function()
         if record.mode == "limited" then
+            moveToCid()
+            local crateKey = universeName or sourceUniverse or normalized or crateName
+            local crateLabel = rawName or normalized or crateName
             local payload = {
-                crateName = rawName or normalized,
-                crate = rawName or normalized,
-                crateId = rawName or normalized,
-                universeName = universeName,
-                universe = universeName,
-                rollCount = 1,
-                amount = price or 1,
-                cost = price,
+                crate = crateLabel,
+                crateName = crateLabel,
+                universe = crateKey,
+                universeName = crateKey,
                 price = price,
-                auto = false,
+                cratePrice = price,
+                cost = price,
+                costGem = price,
+                gemCost = price,
                 currency = currency or "Gems",
                 currencyType = currency or "Gems",
-                useGems = true,
+                currencyName = currency or "Gems",
             }
-            record.remote:FireServer("startReroll", payload)
+            if record.remote:IsA("RemoteFunction") then
+                record.remote:InvokeServer(crateKey, payload)
+            else
+                record.remote:FireServer(crateKey, payload)
+            end
         elseif record.mode == "button" then
             record.remote:Fire(rawName or normalized or crateName, universeName)
         elseif record.remote:IsA("RemoteFunction") then
@@ -681,6 +705,22 @@ sellSection:AddToggle({
     end,
 })
 
+sellSection:AddToggle({
+    Name = "Auto Sell Exotic",
+    Default = false,
+    Callback = function(value)
+        autoSellExotic = value
+    end,
+})
+
+sellSection:AddToggle({
+    Name = "Auto Sell Mythic",
+    Default = false,
+    Callback = function(value)
+        autoSellMythic = value
+    end,
+})
+
 sellSection:AddButton({
     Name = "Quick Sell Common",
     Callback = function()
@@ -872,12 +912,22 @@ end)
 
 task.spawn(function()
     while true do
-        if autoSellPets then
-            quickSellRarity("Common")
-            task.wait(0.15)
-            quickSellRarity("Rare")
-            task.wait(0.15)
-            quickSellRarity("Epic")
+        if autoSellPets or autoSellExotic or autoSellMythic then
+            if autoSellPets then
+                quickSellRarity("Common")
+                task.wait(0.15)
+                quickSellRarity("Rare")
+                task.wait(0.15)
+                quickSellRarity("Epic")
+            end
+            if autoSellExotic then
+                task.wait(0.15)
+                quickSellRarity("Exotic")
+            end
+            if autoSellMythic then
+                task.wait(0.15)
+                quickSellRarity("Mythic")
+            end
         end
         task.wait(1)
     end
