@@ -207,6 +207,7 @@ end
 local availableCrates = scanCrateConfigs()
 
 local autoOpenFreeCrate = false
+local autoOpenFreeRobux = false
 local autoSellPets = false
 local autoSellExotic = false
 local autoSellMythic = false
@@ -770,10 +771,11 @@ openSection:AddToggle({
     end,
 })
 
-openSection:AddButton({
-    Name = "Open Free Robux Crate",
-    Callback = function()
-        openFreeRobuxCrate()
+openSection:AddToggle({
+    Name = "Auto Open Free Robux Crate",
+    Default = false,
+    Callback = function(value)
+        autoOpenFreeRobux = value
     end,
 })
 
@@ -894,9 +896,10 @@ utilitySection:AddButton({
 })
 
 utilitySection:AddButton({
-    Name = "Stop All", 
+    Name = "Stop All",
     Callback = function()
         autoOpenFreeCrate = false
+        autoOpenFreeRobux = false
         autoSellPets = false
         autoOpenAllCrates = false
         autoPickup = false
@@ -933,6 +936,15 @@ task.spawn(function()
     while true do
         if autoOpenFreeCrate then
             openFreeCrate()
+        end
+        task.wait(autoOpenSpeed)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoOpenFreeRobux then
+            openFreeRobuxCrate()
         end
         task.wait(autoOpenSpeed)
     end
