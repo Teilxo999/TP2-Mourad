@@ -213,6 +213,7 @@ local autoSellMythic = false
 local autoOpenAllCrates = false
 local autoPickup = false
 local autoFarm = false
+local antiAfk = false
 local luckyMode = false
 local disableAnimations = true
 local autoConvert = true
@@ -371,6 +372,13 @@ local function openFreeCrate()
         convertCurrency(convertAmount)
     end
     fireCrateRemote("FreeCrate")
+end
+
+local function openFreeRobuxCrate()
+    if autoConvert then
+        convertCurrency(convertAmount)
+    end
+    fireCrateRemote("FreeCrateRobux")
 end
 
 local function openCrate(crateName)
@@ -637,6 +645,8 @@ local function triggerCidEvent()
     end
 end
 
+local antiAfkConnection
+
 local Window = OrionLib:MakeWindow({
     Name = "Anime Champions RNG AutoFarm",
     HidePremium = false,
@@ -760,6 +770,13 @@ openSection:AddToggle({
     end,
 })
 
+openSection:AddButton({
+    Name = "Open Free Robux Crate",
+    Callback = function()
+        openFreeRobuxCrate()
+    end,
+})
+
 openSection:AddToggle({
     Name = "Auto Convert Currency",
     Default = autoConvert,
@@ -846,6 +863,26 @@ utilitySection:AddToggle({
     Default = disableAnimations,
     Callback = function(value)
         disableAnimations = value
+    end,
+})
+
+utilitySection:AddToggle({
+    Name = "Anti-AFK",
+    Default = false,
+    Callback = function(value)
+        antiAfk = value
+        if antiAfkConnection then
+            antiAfkConnection:Disconnect()
+            antiAfkConnection = nil
+        end
+        if value then
+            local VirtualUser = game:GetService("VirtualUser")
+            antiAfkConnection = LocalPlayer.Idled:Connect(function()
+                VirtualUser:Button2Down(Vector2.new(0, 0), Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame or CFrame.new())
+                task.wait(1)
+                VirtualUser:Button2Up(Vector2.new(0, 0), Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame or CFrame.new())
+            end)
+        end
     end,
 })
 
